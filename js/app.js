@@ -109,7 +109,58 @@
   const readCount = (id) => S.readCount[id] || 0;
   const hanCount = (story) => story.lines.reduce((n, l) => n + [...l.t].filter(Zhuyin.isHan).length, 0);
 
-  // 今天的任務：先排新文章（家長自訂的優先），保留一篇讀過最少次的當複習
+  // ---------------- 錄音清單與播放 ----------------
+
+  // 所有有錄音的朗讀紀錄（由舊到新）：{ date, storyId, recId, sec, at }
+  function allRecs() {
+    const out = [];
+    for (const date of Object.keys(S.days).sort()) {
+      const d = S.days[date];
+      for (const [storyId, r] of Object.entries(d.done)) {
+        if (r.recId) out.push({ date, storyId, recId: r.recId, sec: r.sec, at: r.at });
+      }
+    }
+    return out.sort((a, b) => a.at - b.at);
+  }
+
+  const daysAgo = (date) => Math.round((new Date(Store.today()) - new Date(date)) / 86400000);
+
+  // 成長對照：最近一次錄音已經超過 compareDays 天的文章，回傳「第一次」的錄音
+  function oldRecFor(storyId, recs) {
+    const days = S.settings.compareDays;
+    const list = recs.filter((r) => r.storyId === storyId);
+    if (!days || !list.length || daysAgo(list[list.length - 1].date) < days) return null;
+    return list[0];
+  }
+
+  const Player = {
+    audio: null,
+    url: null,
+    play(blob) {
+      this.stop();
+      this.url = URL.createObjectURL(blob);
+      this.audio = new Audio(this.url);
+      this.audio.play().catch(() => toast('這段錄音無法播放'));
+    },
+    async playRec(recId) {
+      const rec = await Store.audio.get(recId).catch(() => null);
+      if (!rec) return toast('找不到這段錄音（可能已被刪除）');
+      this.play(rec.blob);
+    },
+    stop() {
+      if (this.audio) this.audio.pause();
+      if (this.url) URL.revokeObjectURL(this.url);
+      this.audio = null;
+      this.url = null;
+    },
+  };
+
+  const ym = (date) => date.slice(0, 7);
+  // 上個月以前、有錄音但還沒匯出紀念冊的月份
+  const unexportedMonths = () =>
+    [...new Set(allRecs().map((r) => ym(r.date)))].filter((m) => m < ym(Store.today()) && !S.exported[m]);
+
+  // 今天的任務：先排新文章（家長自訂的優先），保留一篇讀過最少次的當複習（優先挑可以做成長對照的）
   function ensurePlan() {
     const key = Store.today();
     const goal = S.settings.dailyGoal;
@@ -133,7 +184,15 @@
       const picks = [];
       const wantReview = read.length && !d.review.length ? 1 : 0;
       while (picks.length < d.goal - d.plan.length - wantReview && unread.length) picks.push(unread.shift());
-      if (wantReview) { const r = read.shift(); picks.push(r); d.review.push(r.id); }
+      if (wantReview) {
+        const recs = allRecs();
+        const old = read.map((s) => ({ s, rec: oldRecFor(s.id, recs) })).find((x) => x.rec);
+        const r = old ? old.s : read[0];
+        read.splice(read.indexOf(r), 1);
+        picks.push(r);
+        d.review.push(r.id);
+        if (old) d.compare = Object.assign(d.compare || {}, { [r.id]: old.rec });
+      }
       while (picks.length < d.goal - d.plan.length && (unread.length || read.length)) picks.push(unread.shift() || read.shift());
       d.plan.push(...picks.map((s) => s.id));
     }
@@ -158,6 +217,7 @@
 
   function route() {
     if (cleanup) { cleanup(); cleanup = null; }
+    Player.stop();
     closeModal();
     window.scrollTo(0, 0);
     const [name, ...args] = location.hash.replace(/^#\/?/, '').split('/');
@@ -211,7 +271,7 @@
     app.innerHTML = `
       <header class="top home-top">
         <h1>📖 注音小書蟲</h1>
-        <div class="top-right">${st ? `<span class="streak">🔥 連續 ${st} 天</span>` : ''}<button class="icon" data-go="parent" aria-label="爸媽專區">⚙️</button></div>
+        <div class="top-right">${st ? `<span class="streak">🔥 連續 ${st} 天</span>` : ''}<button class="icon badge-wrap" data-go="parent" aria-label="爸媽專區">⚙️${unexportedMonths().length ? '<span class="badge"></span>' : ''}</button></div>
       </header>
       <section class="card hero">
         <div class="hero-row"><div class="hero-title">今天的任務</div><div class="count">${n} / ${d.goal}</div></div>
@@ -275,8 +335,7 @@
     const flat = story.lines.flatMap((l) => { const z = l.z || Zhuyin.auto(l.t); return [...l.t].map((ch, k) => ({ ch, zy: z[k] })); });
     const minSec = Math.max(3, Math.round(hanCount(story) * S.settings.minSecPerChar));
     const already = isTask && ensurePlan().done[id];
-    const rec = { state: 'idle', blob: null, sec: 0, timer: null, url: null, noMic: false };
-    let player = null;
+    const rec = { state: 'idle', blob: null, sec: 0, timer: null, noMic: false };
 
     const modes = [['zhuyin', 'ㄅㄆㄇ'], ['both', '字+ㄅㄆㄇ'], ['hanzi', '國字']];
     function renderPage() {
@@ -348,12 +407,7 @@
     }
 
     function play() {
-      if (!rec.blob) return;
-      if (player) player.pause();
-      if (rec.url) URL.revokeObjectURL(rec.url);
-      rec.url = URL.createObjectURL(rec.blob);
-      player = new Audio(rec.url);
-      player.play();
+      if (rec.blob) Player.play(rec.blob);
     }
 
     app.onclick = (e) => {
@@ -382,31 +436,47 @@
       if (isTask && rec.blob) {
         recId = 'r' + Date.now();
         try {
-          await Store.audio.put(recId, { blob: rec.blob, storyId: id, date: Store.today(), sec: rec.sec });
+          // 連同文章內容一起存，之後匯出紀念冊時就算文章被刪了也看得到
+          await Store.audio.put(recId, {
+            blob: rec.blob, storyId: id, date: Store.today(), sec: rec.sec,
+            title: story.title.t, lines: story.lines.map((l) => ({ t: l.t, z: l.z || Zhuyin.auto(l.t) })),
+          });
+          Store.persist().catch(() => {});
         } catch (e) { recId = null; }
       }
       S.readCount[id] = readCount(id) + 1;
       let complete = false;
       let n = 0;
+      let old = null;
       if (isTask) {
         const d = ensurePlan();
         if (d.plan.includes(id) && !d.done[id]) d.done[id] = { at: Date.now(), recId, sec: Math.round(rec.sec) };
         n = doneCount(d);
         complete = n >= d.goal && !d.spun;
+        old = d.compare && d.compare[id];
+        if (old && !(await Store.audio.get(old.recId).catch(() => null))) old = null;
       }
       save();
       sfx.win();
       confetti();
+      const [, om, od] = old ? old.date.split('-').map(Number) : [];
       openModal(`
         <div class="celebrate">
           <div class="big-emoji">${complete ? '🏆' : '🎉'}</div>
           <h2>${complete ? '今天的任務全部完成！' : '太棒了！讀完一篇！'}</h2>
           ${isTask ? `<p>今天已經讀了 ${n} 篇</p>` : '<p>多讀一篇，越來越厲害！</p>'}
+          ${old && rec.blob ? `<div class="compare">
+            <h3>🕰️ 成長對照</h3>
+            <p>你在 ${om} 月 ${od} 日也念過這篇！聽聽看有什麼不一樣？</p>
+            <div class="row"><button class="btn" data-play-old>▶ ${om}/${od} 的你</button><button class="btn" data-play-new>▶ 今天的你</button></div>
+          </div>` : ''}
           <div class="row">
             ${complete ? '<button class="btn big go" data-close-go="wheel">🎡 去轉輪盤</button>' : '<button class="btn big" data-close-go="home">回首頁</button>'}
           </div>
         </div>`, { closable: false });
       $('#modal-root').onclick = (e) => {
+        if (e.target.closest('[data-play-old]')) return Player.playRec(old.recId);
+        if (e.target.closest('[data-play-new]')) return Player.play(rec.blob);
         const b = e.target.closest('[data-close-go]');
         if (b) { closeModal(); go(b.dataset.closeGo); }
       };
@@ -415,8 +485,6 @@
     cleanup = () => {
       clearInterval(rec.timer);
       Recorder.release();
-      if (player) player.pause();
-      if (rec.url) URL.revokeObjectURL(rec.url);
       app.onclick = null;
       if ('speechSynthesis' in window) speechSynthesis.cancel();
     };
@@ -684,14 +752,14 @@
     input.onkeydown = (e) => { if (e.key === 'Enter') check(); };
   }
 
-  const TABS = [['settings', '設定'], ['prizes', '獎項'], ['records', '朗讀紀錄'], ['stories', '題庫'], ['data', '資料']];
+  const TABS = [['settings', '設定'], ['prizes', '獎項'], ['records', '朗讀紀錄'], ['keepsake', '紀念冊'], ['stories', '題庫'], ['data', '資料']];
 
   function viewParent(tab) {
     app.innerHTML = `${topbar('⚙️ 爸媽專區')}
-      <nav class="tabs">${TABS.map(([k, label]) => `<button data-go="parent/${k}" class="${k === tab ? 'on' : ''}">${label}</button>`).join('')}</nav>
+      <nav class="tabs">${TABS.map(([k, label]) => `<button data-go="parent/${k}" class="badge-wrap ${k === tab ? 'on' : ''}">${label}${k === 'keepsake' && unexportedMonths().length ? '<span class="badge"></span>' : ''}</button>`).join('')}</nav>
       <section class="panel" id="panel"></section>`;
     const panel = $('#panel');
-    ({ settings: parentSettings, prizes: parentPrizes, records: parentRecords, stories: parentStories, data: parentData }[tab] || parentSettings)(panel);
+    ({ settings: parentSettings, prizes: parentPrizes, records: parentRecords, keepsake: parentKeepsake, stories: parentStories, data: parentData }[tab] || parentSettings)(panel);
   }
 
   function parentSettings(panel) {
@@ -708,8 +776,10 @@
         ${opt(0.2, st.minSecPerChar, '0.2 秒（寬鬆）')}${opt(0.35, st.minSecPerChar, '0.35 秒（建議）')}${opt(0.5, st.minSecPerChar, '0.5 秒（嚴格）')}</select></label>
       <label class="field"><span>大獎保底（連續幾次沒中就必中）</span><select data-set="pity">
         ${[0, 5, 7, 10, 14].map((v) => opt(v, st.pity, v ? `${v} 次` : '不保底')).join('')}</select></label>
-      <label class="field"><span>錄音保留天數</span><select data-set="keepDays">
-        ${[7, 14, 30, 60].map((v) => opt(v, st.keepDays, `${v} 天`)).join('')}</select></label>
+      <label class="field"><span>錄音保留（收藏的永遠不刪）</span><select data-set="keepDays">
+        ${[0, 30, 60, 90].map((v) => opt(v, st.keepDays, v ? `${v} 天後自動刪除` : '永久保留（建議）')).join('')}</select></label>
+      <label class="field"><span>成長對照：多久沒讀的文章再排進來</span><select data-set="compareDays">
+        ${[0, 30, 60, 90].map((v) => opt(v, st.compareDays, v ? `${v} 天` : '關閉')).join('')}</select></label>
       <label class="field"><span>點字發音速度</span><select data-set="speechRate">
         ${opt(0.6, st.speechRate, '慢')}${opt(0.8, st.speechRate, '中')}${opt(1, st.speechRate, '正常')}</select></label>
       <p class="hint">改每日篇數會在今天還沒轉輪盤時立即生效。</p>`;
@@ -729,7 +799,7 @@
       parentSettings(panel);
     };
   }
-  const DEFAULT_TYPES = { mode: '', vertical: true, requireRecording: true, minSecPerChar: 0, pity: 0, keepDays: 0, speechRate: 0 };
+  const DEFAULT_TYPES = { mode: '', vertical: true, requireRecording: true, minSecPerChar: 0, pity: 0, keepDays: 0, compareDays: 0, speechRate: 0 };
 
   function parentPrizes(panel) {
     const total = S.prizes.reduce((a, p) => a + Math.max(0, Number(p.weight) || 0), 0);
@@ -770,49 +840,210 @@
     };
   }
 
-  function parentRecords(panel) {
-    const keys = Object.keys(S.days).sort().reverse().slice(0, 14);
+  const fmtMonth = (m) => { const [y, n] = m.split('-').map(Number); return `${y} 年 ${n} 月`; };
+  const shiftMonth = (m, delta) => { const [y, n] = m.split('-').map(Number); return Store.today(new Date(y, n - 1 + delta, 1)).slice(0, 7); };
+  const hhmm = (at) => { const t = new Date(at); return `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`; };
+  const md = (date) => { const [, m, d] = date.split('-').map(Number); return `${m}/${d}`; };
+
+  function parentRecords(panel, month = ym(Store.today()), favOnly = false) {
+    const recs = allRecs();
     const today = Store.today();
+    const keys = Object.keys(S.days).filter((k) => ym(k) === month).sort().reverse();
     const html = keys.map((key) => {
       const d = S.days[key];
       const spin = d.spun && S.spins.find((s) => s.id === d.spun);
-      const items = d.plan.filter((id) => d.done[id]).map((id) => {
+      const items = d.plan.filter((id) => d.done[id] && (!favOnly || S.favs[d.done[id].recId])).map((id) => {
         const s = storyById(id);
         const r = d.done[id];
-        const t = new Date(r.at);
+        const first = r.recId && recs.find((x) => x.storyId === id && x.date < key);
         return `<div class="rec-row">
           <span class="rec-title">${esc(s ? s.title.t : '（已刪除的文章）')}</span>
-          <span class="rec-meta">${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')} · 念了 ${r.sec} 秒</span>
-          ${r.recId ? `<button class="btn small" data-play="${r.recId}">▶ 播放</button>` : '<span class="rec-meta">（沒有錄音）</span>'}
+          <span class="rec-meta">${hhmm(r.at)} · 念了 ${r.sec} 秒</span>
+          ${r.recId ? `<button class="btn small" data-play="${r.recId}">▶ 播放</button>
+            <button class="fav-btn" data-fav="${r.recId}" aria-label="收藏">${S.favs[r.recId] ? '❤️' : '🤍'}</button>` : '<span class="rec-meta">（沒有錄音）</span>'}
+          ${first ? `<button class="btn small ghost" data-play="${first.recId}">🕰️ 聽 ${md(first.date)} 第一次念</button>` : ''}
           ${key === today && !d.spun ? `<button class="btn small ghost" data-reject="${id}">退回重讀</button>` : ''}
         </div>`;
       }).join('');
+      if (favOnly && !items) return '';
       return `<div class="rec-day"><h4>${fmtDay(key)}　完成 ${doneCount(d)}/${d.goal}${spin ? `　抽到 ${spin.emoji} ${esc(spin.name)}` : ''}</h4>${items || '<p class="hint">這天還沒有讀完的文章</p>'}</div>`;
     }).join('');
-    panel.innerHTML = `<p class="hint">可以聽孩子的朗讀錄音。今天還沒轉輪盤前，可以把念得不好的文章「退回重讀」。錄音保留 ${S.settings.keepDays} 天。</p>${html || '<p class="empty">還沒有紀錄</p>'}`;
-    let player = null;
-    panel.onclick = async (e) => {
+    panel.innerHTML = `
+      <div class="cal-head"><button class="icon" data-month="${shiftMonth(month, -1)}">◀</button><h3>${fmtMonth(month)}</h3><button class="icon" data-month="${shiftMonth(month, 1)}">▶</button></div>
+      <label class="field"><span>只看 ❤️ 收藏</span><input type="checkbox" data-favonly ${favOnly ? 'checked' : ''}></label>
+      <p class="hint">按 🤍 收藏念得特別好的錄音。今天還沒轉輪盤前，可以把念得不好的文章「退回重讀」。</p>
+      ${html || '<p class="empty">這個月沒有紀錄</p>'}`;
+    panel.onchange = (e) => { if (e.target.matches('[data-favonly]')) parentRecords(panel, month, e.target.checked); };
+    panel.onclick = (e) => {
+      const mo = e.target.closest('[data-month]');
+      if (mo) return parentRecords(panel, mo.dataset.month, favOnly);
       const p = e.target.closest('[data-play]');
-      if (p) {
-        const rec = await Store.audio.get(p.dataset.play).catch(() => null);
-        if (!rec) return toast('找不到這段錄音（可能已超過保留天數）');
-        if (player) player.pause();
-        player = new Audio(URL.createObjectURL(rec.blob));
-        player.play();
-        return;
+      if (p) return Player.playRec(p.dataset.play);
+      const f = e.target.closest('[data-fav]');
+      if (f) {
+        if (S.favs[f.dataset.fav]) delete S.favs[f.dataset.fav];
+        else { S.favs[f.dataset.fav] = true; sfx.good(); }
+        save();
+        return parentRecords(panel, month, favOnly);
       }
       const r = e.target.closest('[data-reject]');
       if (r && confirm('確定要退回這篇，請孩子重讀嗎？')) {
         const d = ensurePlan();
         const done = d.done[r.dataset.reject];
-        if (done && done.recId) Store.audio.del(done.recId).catch(() => {});
+        if (done && done.recId) {
+          Store.audio.del(done.recId).catch(() => {});
+          delete S.favs[done.recId];
+        }
         delete d.done[r.dataset.reject];
         S.readCount[r.dataset.reject] = Math.max(0, readCount(r.dataset.reject) - 1);
         save();
-        parentRecords(panel);
+        parentRecords(panel, month, favOnly);
       }
     };
-    cleanup = () => { if (player) player.pause(); };
+  }
+
+  // ---------------- 紀念冊 ----------------
+
+  async function shareFile(file) {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+        return true;
+      } catch (e) {
+        if (e.name === 'AbortError') return false;
+      }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file);
+    a.download = file.name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+    return true;
+  }
+
+  function keepsakeHTML(label, entries) {
+    const minutes = Math.round(entries.reduce((n, e) => n + (e.sec || 0), 0) / 60);
+    const cards = entries.map((e) => `
+      <article class="card">
+        <header><span class="date">${fmtDay(e.date)} ${hhmm(e.at)}</span>${e.fav ? '<span class="fav">❤️ 收藏</span>' : ''}</header>
+        <h2>${Zhuyin.segHTML({ t: e.title, z: Zhuyin.auto(e.title) })}</h2>
+        <div class="text">${e.lines.map((l) => `<div>${Zhuyin.segHTML(l)}</div>`).join('')}</div>
+        <audio controls preload="none" src="${encodeURI(e.name)}"></audio>
+      </article>`).join('');
+    return `<!doctype html><html lang="zh-Hant-TW"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>注音小書蟲 朗讀紀念冊 ${esc(label)}</title>
+<style>
+body{margin:0;background:#fff8ec;color:#3d3027;font-family:-apple-system,"PingFang TC","Microsoft JhengHei",sans-serif;padding:24px 16px}
+main{max-width:760px;margin:0 auto}h1{font-family:"Kaiti TC","BiauKai","DFKai-SB",serif;font-size:34px;margin:0}
+.sum{color:#8a7b6e;margin:8px 0 24px}.card{background:#fffdf8;border:2px solid #eadfce;border-radius:18px;padding:16px 20px;margin-bottom:16px}
+.card header{display:flex;justify-content:space-between;color:#8a7b6e}.fav{color:#e76f51;font-weight:700}
+.card h2{font-family:"Kaiti TC","BiauKai","DFKai-SB",serif;font-size:30px;margin:6px 0}.text{font-family:"Kaiti TC","BiauKai","DFKai-SB",serif;font-size:32px;margin-bottom:10px}
+audio{width:100%}.c{display:inline-flex;align-items:center;vertical-align:middle;margin:0 .04em}.c .h{line-height:1.25}
+.c .z{display:inline-flex;flex-direction:column;justify-content:center;align-items:center;font-size:.34em;line-height:1.02;width:1.25em;margin-left:.06em;color:#2f5fa8}
+.c .s{display:block;position:relative}.c .t{position:absolute;left:92%;top:-.42em}.c .lt{display:block;line-height:.5;height:.55em}
+</style></head><body><main>
+<h1>📖 朗讀紀念冊・${esc(label)}</h1>
+<p class="sum">一共念了 ${entries.length} 篇，大約 ${minutes} 分鐘。錄音檔都在「錄音」資料夾裡。</p>
+${cards}
+</main></body></html>`;
+  }
+
+  async function buildKeepsake(list, label) {
+    const files = [];
+    const entries = [];
+    const used = new Set();
+    for (const r of list) {
+      const rec = await Store.audio.get(r.recId).catch(() => null);
+      if (!rec) continue;
+      const story = storyById(r.storyId);
+      const title = rec.title || (story ? story.title.t : '朗讀');
+      const ext = /webm/.test(rec.blob.type) ? 'webm' : 'm4a';
+      const base = `${r.date}_${title}`.replace(/[\\/:*?"<>|]/g, '');
+      let name = `錄音/${base}.${ext}`;
+      for (let k = 2; used.has(name); k++) name = `錄音/${base}-${k}.${ext}`;
+      used.add(name);
+      files.push({ name, data: rec.blob, date: new Date(r.at) });
+      entries.push(Object.assign({}, r, { title, name, lines: rec.lines || (story ? story.lines : []), fav: !!S.favs[r.recId] }));
+    }
+    files.unshift({ name: '紀念冊.html', data: keepsakeHTML(label, entries) });
+    const blob = await Zip.build(files);
+    return { file: new File([blob], `注音小書蟲_${label}.zip`, { type: 'application/zip' }), count: entries.length };
+  }
+
+  function parentKeepsake(panel) {
+    const recs = allRecs();
+    const thisMonth = ym(Store.today());
+    const months = [...new Set(recs.map((r) => ym(r.date)))].sort().reverse();
+    const favs = recs.filter((r) => S.favs[r.recId]);
+    const pending = unexportedMonths();
+    const built = {};
+    const row = (key, name, meta, state) => `
+      <div class="ks-row" data-key="${key}">
+        <span class="ks-name">${name}</span><span class="rec-meta">${meta}</span><span class="ks-state">${state}</span>
+        <span class="ks-act"><button class="btn" data-build="${key}">準備紀念冊</button></span>
+      </div>`;
+    panel.innerHTML = `
+      ${pending.length ? `<div class="notice">📌 ${pending.map(fmtMonth).join('、')}的錄音還沒存到 iCloud 雲碟，記得備份喔！</div>` : ''}
+      <h3>儲存狀態</h3>
+      <p class="hint" id="ks-usage">計算中…</p>
+      <h3>每月朗讀紀念冊</h3>
+      <ol class="hint steps">
+        <li>按「準備紀念冊」，把這個月的錄音打包成一個壓縮檔。</li>
+        <li>按「📤 存到 iCloud 雲碟」，在分享選單選「儲存到檔案」→「iCloud 雲碟」。建議建一個「注音小書蟲」資料夾。</li>
+        <li>在「檔案」App 點一下壓縮檔就會解開。「錄音」資料夾裡的檔案可以直接播放；用電腦打開「紀念冊.html」，可以邊看文章邊聽錄音。</li>
+      </ol>
+      ${months.map((m) => {
+        const n = recs.filter((r) => ym(r.date) === m).length;
+        const f = recs.filter((r) => ym(r.date) === m && S.favs[r.recId]).length;
+        const state = S.exported[m] ? `✅ 已存（${new Date(S.exported[m]).toLocaleDateString('zh-TW')}）`
+          : m === thisMonth ? '本月還在進行中' : '⚠️ 尚未備份';
+        return row(m, fmtMonth(m), `${n} 段 · ❤️ ${f}`, state);
+      }).join('') || '<p class="empty">還沒有錄音</p>'}
+      <h3>❤️ 收藏精選</h3>
+      ${favs.length ? row('fav', '全部收藏', `${favs.length} 段`, '') : '<p class="hint">在「朗讀紀錄」按 🤍 收藏念得特別好的錄音，就可以在這裡匯出精選集。</p>'}`;
+
+    Store.usage().then((u) => {
+      const el = $('#ks-usage', panel);
+      if (!el) return;
+      el.innerHTML = `錄音 ${recs.length} 段，約使用 ${(u.used / 1048576).toFixed(1)} MB。<br>
+        ${u.persisted ? '✅ 已啟用持久儲存' : '⚠️ 尚未啟用持久儲存 <button class="btn small" data-persist>啟用</button>'}
+        ${S.settings.keepDays ? `⚠️ 錄音會在 ${S.settings.keepDays} 天後自動刪除（收藏的除外）` : '✅ 錄音永久保留'}<br>
+        提醒：從主畫面刪除 App 或清除 Safari 資料，錄音就會消失，所以每個月記得存一份到 iCloud 雲碟。`;
+    }).catch(() => {});
+
+    panel.onclick = async (e) => {
+      if (e.target.closest('[data-persist]')) {
+        const ok = await Store.persist().catch(() => false);
+        toast(ok ? '已啟用持久儲存' : 'Safari 沒有同意，請先把 App 加到主畫面再試');
+        return parentKeepsake(panel);
+      }
+      const b = e.target.closest('[data-build]');
+      if (b) {
+        const key = b.dataset.build;
+        b.disabled = true;
+        b.textContent = '打包中…';
+        const list = key === 'fav' ? favs : recs.filter((r) => ym(r.date) === key);
+        const result = await buildKeepsake(list, key === 'fav' ? '收藏精選' : fmtMonth(key).replace(/ /g, ''));
+        if (!result.count) {
+          b.textContent = '找不到錄音檔';
+          return;
+        }
+        built[key] = result.file;
+        b.parentElement.innerHTML = `<button class="btn go" data-share="${key}">📤 存到 iCloud 雲碟</button>`;
+        return;
+      }
+      const s = e.target.closest('[data-share]');
+      if (s) {
+        const key = s.dataset.share;
+        const ok = await shareFile(built[key]);
+        if (ok && key !== 'fav' && key !== thisMonth) {
+          S.exported[key] = Date.now();
+          save();
+          toast('已記錄這個月的紀念冊備份 ✅');
+          viewParent('keepsake');
+        }
+      }
+    };
   }
 
   function parentStories(panel) {
@@ -962,6 +1193,6 @@
   window.addEventListener('hashchange', route);
   // 跨過午夜回到 App 時重新整理今天的任務
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !location.hash.startsWith('#/read')) route(); });
-  Store.audio.prune(S.settings.keepDays).catch(() => {});
+  Store.audio.prune(S.settings.keepDays, S.favs).catch(() => {});
   route();
 })();

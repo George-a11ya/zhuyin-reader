@@ -20,7 +20,8 @@ window.Store = (function () {
       minSecPerChar: 0.35, // 每個字至少要念多久（秒），防止亂按
       requireRecording: true,
       pity: 7, // 連續幾次沒中大獎就保底（0 = 不保底）
-      keepDays: 30, // 錄音保留天數
+      keepDays: 0, // 錄音保留天數（0 = 永久保留）
+      compareDays: 60, // 多久以前讀過的文章會排進「成長對照」（0 = 關閉）
       speechRate: 0.8,
     },
     prizes: DEFAULT_PRIZES,
@@ -30,6 +31,9 @@ window.Store = (function () {
     sinceBig: 0,
     words: [], // { ch, zy }
     custom: [], // 家長自訂文章
+    favs: {}, // 收藏的錄音 { recId: true }
+    exported: {}, // 已匯出紀念冊的月份 { 'YYYY-MM': 時間 }
+    schema: 2,
   };
 
   function today(d = new Date()) {
@@ -41,6 +45,11 @@ window.Store = (function () {
     try { data = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { data = {}; }
     const merged = Object.assign(JSON.parse(JSON.stringify(DEFAULTS)), data);
     merged.settings = Object.assign({}, DEFAULTS.settings, data.settings || {});
+    if ((data.schema || 1) < 2) {
+      // v2 起錄音預設永久保留
+      merged.settings.keepDays = 0;
+      merged.schema = 2;
+    }
     return merged;
   }
 
@@ -75,18 +84,33 @@ window.Store = (function () {
     put: (id, rec) => tx('readwrite', (s) => s.put(rec, id)),
     get: (id) => tx('readonly', (s) => s.get(id)),
     del: (id) => tx('readwrite', (s) => s.delete(id)),
-    prune(keepDays) {
+    // 刪除超過保留天數的錄音，收藏的不刪
+    prune(keepDays, keepIds) {
+      if (!keepDays) return Promise.resolve();
       const cutoff = today(new Date(Date.now() - keepDays * 86400000));
       return tx('readwrite', (s) => {
         s.openCursor().onsuccess = (e) => {
           const cur = e.target.result;
           if (!cur) return;
-          if (cur.value.date < cutoff) cur.delete();
+          if (cur.value.date < cutoff && !keepIds[cur.key]) cur.delete();
           cur.continue();
         };
       });
     },
   };
 
-  return { load, save, today, audio, DEFAULT_PRIZES };
+  // 向瀏覽器申請持久儲存，降低錄音被系統清掉的機會
+  async function persist() {
+    if (!navigator.storage || !navigator.storage.persist) return false;
+    if (await navigator.storage.persisted()) return true;
+    return navigator.storage.persist();
+  }
+
+  async function usage() {
+    const persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted() : false;
+    const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate() : {};
+    return { persisted, used: est.usage || 0 };
+  }
+
+  return { load, save, today, audio, persist, usage, DEFAULT_PRIZES };
 })();
