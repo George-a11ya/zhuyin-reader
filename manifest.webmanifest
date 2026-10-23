@@ -1,0 +1,16 @@
+{
+  "name": "注音小書蟲",
+  "short_name": "注音小書蟲",
+  "description": "國小一年級注音閱讀練習：每日任務、朗讀錄音、輪盤抽獎",
+  "lang": "zh-Hant-TW",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#fff8ec",
+  "theme_color": "#fff8ec",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
