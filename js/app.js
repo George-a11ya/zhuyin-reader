@@ -47,10 +47,22 @@
     root.onclick = null;
   }
 
+  // iPad Safari：用過麥克風後，音訊會卡在「錄音模式」導致整台沒聲音。
+  // 錄音前切到 play-and-record、結束後切回 playback，並關掉音效用的 AudioContext 再重建。
+  const audioSession = (type) => {
+    try { if (navigator.audioSession) navigator.audioSession.type = type; } catch (e) { /* 舊版 Safari 沒有這個 API */ }
+  };
+
   let actx = null;
+  function closeSfx() {
+    if (actx) { actx.close().catch(() => {}); actx = null; }
+  }
   function beep(notes) {
+    if (Recorder.stream) return; // 錄音中不出音效
     try {
+      audioSession('playback');
       actx = actx || new (window.AudioContext || window.webkitAudioContext)();
+      if (actx.state === 'suspended') actx.resume();
       let t = actx.currentTime;
       for (const [freq, dur] of notes) {
         const o = actx.createOscillator();
@@ -75,6 +87,7 @@
 
   function speak(text) {
     if (!('speechSynthesis' in window)) return toast('這台裝置不支援語音');
+    audioSession('playback');
     speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'zh-TW';
@@ -138,6 +151,7 @@
     url: null,
     play(blob) {
       this.stop();
+      audioSession('playback');
       this.url = URL.createObjectURL(blob);
       this.audio = new Audio(this.url);
       this.audio.play().catch(() => toast('這段錄音無法播放'));
@@ -294,7 +308,16 @@
     mr: null, stream: null, chunks: [], started: 0,
     supported: () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder),
     async begin() {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      closeSfx();
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+      Player.stop();
+      audioSession('play-and-record');
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        audioSession('playback');
+        throw e;
+      }
       const type = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t));
       this.mr = new MediaRecorder(this.stream, type ? { mimeType: type } : undefined);
       this.chunks = [];
@@ -314,8 +337,13 @@
       });
     },
     release() {
+      if (this.mr && this.mr.state !== 'inactive') {
+        this.mr.onstop = null;
+        this.mr.stop();
+      }
       if (this.stream) this.stream.getTracks().forEach((t) => t.stop());
       this.stream = null;
+      audioSession('playback');
     },
   };
 
