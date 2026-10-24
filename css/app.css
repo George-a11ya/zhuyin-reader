@@ -257,3 +257,4 @@ h3 { margin: 24px 0 10px; font-size: 20px; }
 .compare { background: #eef5ff; border-radius: 16px; padding: 12px 16px; margin: 12px 0; }
 .compare h3 { margin: 0 0 4px; }
 .compare .row { justify-content: center; }
+.btn.playing { background: var(--accent); color: #fff; box-shadow: 0 3px 0 var(--accent-dark); }

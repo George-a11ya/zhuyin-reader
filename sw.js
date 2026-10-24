@@ -1,5 +1,5 @@
 // 離線快取：有網路時先抓最新版並更新快取，沒網路才用快取。改版時調高 VERSION。
-const VERSION = 'v3';
+const VERSION = 'v4';
 const CACHE = 'zhuyin-reader-' + VERSION;
 const FILES = [
   './', 'index.html', 'css/app.css', 'js/app.js', 'js/store.js', 'js/zhuyin.js',

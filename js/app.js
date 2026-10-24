@@ -146,26 +146,42 @@
     return list[0];
   }
 
+  // 播放錄音：同一顆按鈕再按一次就停止，播放中按鈕會變成「⏹ 停止」
   const Player = {
     audio: null,
     url: null,
-    play(blob) {
+    btn: null,
+    play(blob, btn) {
+      if (btn && btn === this.btn) return this.stop();
       this.stop();
       audioSession('playback');
       this.url = URL.createObjectURL(blob);
       this.audio = new Audio(this.url);
-      this.audio.play().catch(() => toast('這段錄音無法播放'));
+      this.audio.onended = () => this.stop();
+      if (btn) {
+        this.btn = btn;
+        btn.dataset.label = btn.innerHTML;
+        btn.innerHTML = '⏹ 停止';
+        btn.classList.add('playing');
+      }
+      this.audio.play().catch(() => { toast('這段錄音無法播放'); this.stop(); });
     },
-    async playRec(recId) {
+    async playRec(recId, btn) {
+      if (btn && btn === this.btn) return this.stop();
       const rec = await Store.audio.get(recId).catch(() => null);
       if (!rec) return toast('找不到這段錄音（可能已被刪除）');
-      this.play(rec.blob);
+      this.play(rec.blob, btn);
     },
     stop() {
-      if (this.audio) this.audio.pause();
+      if (this.audio) { this.audio.onended = null; this.audio.pause(); }
       if (this.url) URL.revokeObjectURL(this.url);
+      if (this.btn) {
+        this.btn.innerHTML = this.btn.dataset.label;
+        this.btn.classList.remove('playing');
+      }
       this.audio = null;
       this.url = null;
+      this.btn = null;
     },
   };
 
@@ -434,8 +450,8 @@
       renderBar();
     }
 
-    function play() {
-      if (rec.blob) Player.play(rec.blob);
+    function play(btn) {
+      if (rec.blob) Player.play(rec.blob, btn);
     }
 
     app.onclick = (e) => {
@@ -454,9 +470,12 @@
       }
       if (act === 'start') start();
       if (act === 'stop') stop();
-      if (act === 'play') play();
-      if (act === 'redo') { rec.state = 'idle'; rec.blob = null; renderBar(); }
-      if (act === 'next') openQuiz(story, () => finish());
+      if (act === 'play') play(a);
+      if (act === 'redo') { Player.stop(); rec.state = 'idle'; rec.blob = null; renderBar(); }
+      if (act === 'next') {
+        Player.stop();
+        openQuiz(story, () => finish());
+      }
     };
 
     async function finish() {
@@ -503,8 +522,10 @@
           </div>
         </div>`, { closable: false });
       $('#modal-root').onclick = (e) => {
-        if (e.target.closest('[data-play-old]')) return Player.playRec(old.recId);
-        if (e.target.closest('[data-play-new]')) return Player.play(rec.blob);
+        const po = e.target.closest('[data-play-old]');
+        if (po) return Player.playRec(old.recId, po);
+        const pn = e.target.closest('[data-play-new]');
+        if (pn) return Player.play(rec.blob, pn);
         const b = e.target.closest('[data-close-go]');
         if (b) { closeModal(); go(b.dataset.closeGo); }
       };
@@ -874,6 +895,7 @@
   const md = (date) => { const [, m, d] = date.split('-').map(Number); return `${m}/${d}`; };
 
   function parentRecords(panel, month = ym(Store.today()), favOnly = false) {
+    Player.stop(); // 重畫後原本的停止按鈕會消失，先停掉播放
     const recs = allRecs();
     const today = Store.today();
     const keys = Object.keys(S.days).filter((k) => ym(k) === month).sort().reverse();
@@ -906,7 +928,7 @@
       const mo = e.target.closest('[data-month]');
       if (mo) return parentRecords(panel, mo.dataset.month, favOnly);
       const p = e.target.closest('[data-play]');
-      if (p) return Player.playRec(p.dataset.play);
+      if (p) return Player.playRec(p.dataset.play, p);
       const f = e.target.closest('[data-fav]');
       if (f) {
         if (S.favs[f.dataset.fav]) delete S.favs[f.dataset.fav];
